@@ -96,7 +96,7 @@ int readi(uint16_t ino, struct inode *inode) {
 	uint16_t block_offset = ino % 16;
 
   	// Step 3: Read the block from disk and then copy into inode structure
-	void* buffer = malloc(sizeof(BLOCK_SIZE));
+	void* buffer = malloc(BLOCK_SIZE);	// BUG SPOT #1
 	bio_read(block_num, buffer);
 	memcpy(inode, buffer + block_offset * sizeof(struct inode), sizeof(struct inode));	// this pointer arithmetic should be right
 	free(buffer);		// once you copied it into the inode, this should be able to be freed
@@ -114,7 +114,7 @@ int writei(uint16_t ino, struct inode *inode) {
 
 	// Step 3: Write inode to disk
 	// don't you check to see if this is occupied first?
-	void* buffer = malloc(sizeof(BLOCK_SIZE));
+	void* buffer = malloc(BLOCK_SIZE);	// BUG SPOT #2
 	bio_read(block_num, buffer);								// this is what was in the inode table before
 	memcpy(buffer + block_offset * sizeof(struct inode), inode, sizeof(struct inode));	// this pointer arithmetic should be right
 	bio_write(block_num, buffer);								// FORGOT THIS STEP: write back into disk
