@@ -32,24 +32,27 @@ char diskfile_path[PATH_MAX];		// the main() function sets this for us
 // These will be the buffers you need to read into and write from.
 // Also, have to check for the magic number in the disk file. (Logic was split into two parts, from today's lecture.)
 
+// MILESTONE: At the very least, have mkdir and rmdir fully functional by the end of the break.
+
 /* 
  * Get available inode number from bitmap
  */
 int get_avail_ino() {
 
 	// Step 1: Read inode bitmap from disk
+	// wouldn't you allocate a whole block for this?
 	bitmap_t inode_bitmap = (bitmap_t)malloc(MAX_INUM / 8);			// could this become an in-memory DS?
 	bio_read(1, inode_bitmap);
 
 	// Step 2: Traverse inode bitmap to find an available slot
-	int count = 1;								// starts at 1, inode #0 is reserved for empty blocks
-	for(count = 1; count < MAX_INUM; count++){
+	int count = 0;								// starts at 1, inode #0 is reserved for empty blocks
+	for(count = 0; count < MAX_INUM; count++){				// actually, it starts at 0 since we have the valid attribute
 		if(get_bitmap(inode_bitmap, count) == 0){
 			// Step 3: Update inode bitmap and write to disk
 			set_bitmap(inode_bitmap, count);
 			bio_write(count, inode_bitmap);
 			free(inode_bitmap);
-			return 0;						// QUESTION: do you return the number of the inode instead?
+			return count;						// return the inode number
 		}
 	}
 
@@ -64,7 +67,7 @@ int get_avail_blkno() {
 
 	// Step 1: Read data block bitmap from disk
 	// idea: free the memory of the buffer once you no longer need it
-	bitmap_t data_bitmap = (bitmap_t)malloc(MAX_DNUM / 8);
+	bitmap_t data_bitmap = (bitmap_t)malloc(MAX_DNUM / 8);			// what happens if you overfill something?
 	bio_read(2, data_bitmap);
 
 	// Step 2: Traverse data block bitmap to find an available slot
@@ -75,7 +78,7 @@ int get_avail_blkno() {
 			set_bitmap(data_bitmap, count);
 			bio_write(count, data_bitmap);
 			free(data_bitmap);			// have to free() in both places
-			return 0;				// QUESTION: do you return the number of the block number instead?
+			return count;				// return the data block number
 		}
 	}
 
@@ -96,7 +99,7 @@ int readi(uint16_t ino, struct inode *inode) {
 	uint16_t block_offset = ino % 16;
 
   	// Step 3: Read the block from disk and then copy into inode structure
-	void* buffer = malloc(BLOCK_SIZE);	// BUG SPOT #1
+	void* buffer = malloc(BLOCK_SIZE);		// BUG SPOT #1
 	bio_read(block_num, buffer);
 	memcpy(inode, buffer + block_offset * sizeof(struct inode), sizeof(struct inode));	// this pointer arithmetic should be right
 	free(buffer);		// once you copied it into the inode, this should be able to be freed
@@ -114,7 +117,7 @@ int writei(uint16_t ino, struct inode *inode) {
 
 	// Step 3: Write inode to disk
 	// don't you check to see if this is occupied first?
-	void* buffer = malloc(BLOCK_SIZE);	// BUG SPOT #2
+	void* buffer = malloc(BLOCK_SIZE);		// BUG SPOT #2
 	bio_read(block_num, buffer);								// this is what was in the inode table before
 	memcpy(buffer + block_offset * sizeof(struct inode), inode, sizeof(struct inode));	// this pointer arithmetic should be right
 	bio_write(block_num, buffer);								// FORGOT THIS STEP: write back into disk
@@ -130,60 +133,198 @@ int writei(uint16_t ino, struct inode *inode) {
 int dir_find(uint16_t ino, const char *fname, size_t name_len, struct dirent *dirent) {
 
   	// Step 1: Call readi() to get the inode using ino (inode number of current directory)
+	struct inode* inode_buffer = (struct inode*)malloc(sizeof(struct inode));
+	readi(ino, inode_buffer);		// read the inode disk block
 
   	// Step 2: Get data block of current directory from inode
+	// In essence, go through all of the sixteen possible data blocks in the file. If you see a -1, that block is empty and you should stop.
+	int data_block = 0;
+	for(data_block = 0; data_block < 16; data_block++){
+		int curr_addr = inode_buffer->direct_ptr[data_block];
+		if(curr_addr == -1){
+			return -1;		// couldn't find the entry you wanted to look for
+		}
+		struct dirent** block_buffer = (struct dirent**)malloc(BLOCK_SIZE);
+		int dirent_no = 0;
+		for(dirent_no = 0; dirent_no < 16; dirent_no++){
+			bio_read(curr_addr, (void*)block_buffer);
+			struct dirent* curr_file = block_buffer[dirent_no];
+			if(curr_file == NULL){
+				free(inode_buffer);
+				free(block_buffer);
+				return -1;	// no more files can be after a NULL block
+				// also could do a break here, won't make a difference
+			}
+			if(strcmp(curr_file->name, fname) == 0 && strlen(curr_file->name) == name_len && curr_file->valid == 1){
+				memcpy(dirent, curr_file, sizeof(struct dirent));		// can't have NULL here, seg fault
+				free(inode_buffer);
+				free(block_buffer);
+				return 0;	// this was a successful return
+			}
+		}
+		free(block_buffer);		// prevent memory leaks
+	}
 
-	// Step 3: Read directory's data block and check each directory entry.
-	// If the name matches, then copy directory entry to dirent structure
+	// if you got here, this means all of the data blocks were full
+	free(inode_buffer);
+	return -1;				// unsuccessful return
 
-	return 0;
 }
 
+// CLARIFIER: fname is NOT an absolute directory, now is it?
 int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t name_len) {
+	// Now, it will be dir_add() responsibility to make the area NOT NULL anymore.
 
 	// Step 1: Read dir_inode's data block and check each directory entry of dir_inode
-
 	// Step 2: Check if fname (directory name) is already used in other entries
+	int data_block = 0;
+	for(data_block = 0; data_block < 16; data_block++){
+		int curr_addr = dir_inode.direct_ptr[data_block];
+		if(curr_addr == -1){
+			int data_blk_num = get_avail_blkno();
+			data_blk_num += 67; 		// first data block is 67, so add 67 to the found number
+			struct dirent** block_buffer = (struct dirent**)malloc(BLOCK_SIZE);
+			int count = 0;
+			for(count = 0; count < 16; count++){
+				block_buffer[count] = NULL;
+			}
+			struct dirent* new_entry = (struct dirent*)malloc(sizeof(struct dirent));
+			new_entry->ino = f_ino;
+			new_entry->valid = 1;		// it's now a valid entry
+			memset(new_entry->name, 0, sizeof(new_entry->name));
+			strcat(new_entry->name, fname);
+			block_buffer[0] = new_entry;
+			// then, write all this back to the file using bio_write()
+			bio_write(data_blk_num, (void*)block_buffer);
+			free(block_buffer);		// can now free, as it persists on the file
+			free(new_entry);		// can now free, as it persists on the file
+			return 0;			// successful return, had to allocate a new data block
+		}
+		struct dirent** block_buffer = (struct dirent**)malloc(BLOCK_SIZE);
+		int dirent_no = 0;
+		for(dirent_no = 0; dirent_no < 16; dirent_no++){
+			bio_read(curr_addr, (void*)block_buffer);
+			struct dirent* curr_file = block_buffer[dirent_no];
+			if(curr_file == NULL){
+				// put in another dirent structure
+				struct dirent* new_entry = (struct dirent*)malloc(sizeof(struct dirent));
+				new_entry->ino = f_ino;
+				new_entry->valid = 1;
+				memset(new_entry->name, 0, sizeof(new_entry->name));
+				strcat(new_entry->name, fname);
+				block_buffer[dirent_no] = new_entry;
+				bio_write(curr_addr, (void*)block_buffer);		// now, the modified block buffer
+				free(block_buffer);					// can now free, as it persists on the file
+				free(new_entry);					// can now free, as it persists on the file
+				return 0;						// successful return, wrote on a pre-existing data block
+			}
+			// what if the file was recently deleted and then invlidated?
+			if(curr_file->valid == 0){					// prevent seg fault
+				struct dirent* new_entry = (struct dirent*)malloc(sizeof(struct dirent));
+				new_entry->ino = f_ino;
+				new_entry->valid = 1;
+				memset(new_entry->name, 0, sizeof(new_entry->name));
+				strcat(new_entry->name, fname);
+				block_buffer[dirent_no] = new_entry;
+				bio_write(curr_addr, (void*)block_buffer);
+				free(block_buffer);
+				free(new_entry);
+				return 0;						// successful return, wrote on a pre-existing data block
+			}
+			if(strcmp(curr_file->name, fname) == 0 && strlen(curr_file->name) == name_len && curr_file->valid == 1){
+				free(block_buffer);
+				return -1;		// pre-existing entry with the same exact name, can't do it
+			}
+		}
+		free(block_buffer);			// prevent memory leaks
+	}
 
 	// Step 3: Add directory entry in dir_inode's data block and write to disk (after it wasn't found)
+	// Look for the first data block that is either NULL or invalid (signifying deleted entries).
+	// Allocate a new data block for this directory if it does not exist (not necessary, multiple dirents in one data block)
+	// Update directory inode - what about the last modified business? Is that what we would do?
+	// Write directory entry - as in, you write it to disk
 
-	// Allocate a new data block for this directory if it does not exist
-
-	// Update directory inode
-
-	// Write directory entry
-
-	return 0;
+	// If you got here, this means there is no more space available
+	return -1;					// not enough space to put a new entry in
 }
 
 int dir_remove(struct inode dir_inode, const char *fname, size_t name_len) {
 
 	// Step 1: Read dir_inode's data block and checks each directory entry of dir_inode
-
 	// Step 2: Check if fname exist
+	// Step 3: If exist, then remove it from dir_inode's data block and write to disk (don't forget to write to disk!)
+	int data_block = 0;
+	for(data_block = 0; data_block < 16; data_block++){
+		int curr_addr = dir_inode.direct_ptr[data_block];
+		if(curr_addr == -1){
+			return -1;		// you couldn't find the entry you want to remove
+		}
+		struct dirent** block_buffer = (struct dirent**)malloc(BLOCK_SIZE);
+		int dirent_no = 0;
+		for(dirent_no = 0; dirent_no < 16; dirent_no++){
+			bio_read(curr_addr, (void*)block_buffer);
+			struct dirent* curr_file = block_buffer[dirent_no];
+			if(curr_file == NULL){
+				free(block_buffer);
+				return -1;	// you couldn't find the entry you want to remove
+			}
+			if(strcmp(curr_file->name, fname) == 0 && strlen(curr_file->name) == name_len && curr_file->valid == 1){
+				curr_file->valid = 0;				// invalidate the file
+				bio_write(curr_addr, (void*)block_buffer);	// write the change back into the file
+				free(block_buffer);				// free buffer after resilience has been achieved
+				return 0;					// you successfully "deleted" the file
+			}
+		}
+	}
 
-	// Step 3: If exist, then remove it from dir_inode's data block and write to disk
-
-	return 0;
+	// all data blocks were full, and you couldn't find the file you wanted to delete
+	return -1;
 }
 
-/* 
+/*
  * namei operation
  */
 int get_node_by_path(const char *path, uint16_t ino, struct inode *inode) {
-	// clarifying question: this doesn't take relative addresses, just absolute?
-	// idea: use strtok() and a loop for this
+	// CLARIFIED: This only takes an absolute path, as all FUSE operations do.
+	// IDEA: Use strtok() and loops for this.
 
 	// Step 1: Resolve the path name, walk through path, and finally, find its inode.
 	// Note: You could either implement it in a iterative way or recursive way
+	char* str = (char*)malloc(256);
+	memset(str, 0, 256); 		// zero memset doesn't cause a seg fault, also ensures no foreign characters
+	strcat(str, path);
+	char* token;
+	uint16_t curr_ino_num = ino;
 
-	return 0;
+	token = strtok(str, "/");
+
+	while(token != NULL){
+		// here is the token you want to extract information from
+		// have a dirent struct over here, maybe an extra variable to store the new inode number
+		struct dirent* new_dirent = (struct dirent*)malloc(sizeof(struct dirent));
+		int success = dir_find(curr_ino_num, token, strlen(token), new_dirent);
+		if(success == -1){
+			// couldn't find the desired entry, free everything before returning -1
+			free(str);
+			free(new_dirent);
+			return -1;
+		}
+		// what information do we want to get out of this?
+		curr_ino_num = new_dirent->ino;
+		free(new_dirent);			// could this be a bit shaky? this is done to prevent memory leaks
+	}
+
+	// if we got here, token should be NULL
+	free(str); 	// prevent memory leaks
+	return 0;	// you traversed the path successfully
 }
 
 /* 
  * Make file system
  */
 int tfs_mkfs() {
+	// NOTE: Maybe you should allocate an entire block for those things.
 
 	// Call dev_init() to initialize (Create) Diskfile
 	dev_init(diskfile_path);
@@ -196,7 +337,7 @@ int tfs_mkfs() {
 	first_block->i_bitmap_blk = 1;		// where the inode block bitmap is stored
 	first_block->d_bitmap_blk = 2;		// where the data block bitmap is stored
 	first_block->i_start_blk = 3;		// where the inode table is stored
-	first_block->d_start_blk = 67;		// where the data blocks are stored
+	first_block->d_start_blk = 67;		// where the data blocks are stored (first one is stored at block #67)
 
 	bitmap_t inode_bitmap = NULL;
 	bitmap_t datablock_bitmap = NULL;
@@ -244,13 +385,17 @@ int tfs_mkfs() {
 	}
 
 	// QUESTION: what fields would we have to populate the stat struct with? do we fill those in here?
-	// worry about this more for get_attr()
+	// ANSWER: Just the basic ones, as answered in the Piazza. Also, use the tutorials.
 
 	bio_write(3, first_inode);
 	free(first_inode);			// we can free() once we write the inode into the file
 
-	void* dirent_buffer = malloc(BLOCK_SIZE);
-	memset(dirent_buffer, 0, 16*sizeof(struct dirent));		// initialize the data block with NULL
+	// where we can change the code into an array of structs
+	struct dirent** dirent_buffer = (struct dirent**)malloc(BLOCK_SIZE);
+	int iterate = 0;
+	for(iterate = 0; iterate < 16; iterate++){
+		dirent_buffer[iterate] = NULL;
+	}
 
 	bio_write(67, dirent_buffer);		// placing the dirent struct into the first data block
 	free(dirent_buffer);			// can free the (first) data block buffer, written into the file
@@ -289,6 +434,7 @@ static void tfs_destroy(void *userdata) {
 
 	// Step 1: De-allocate in-memory data structures
 	// QUESTION: Do we even need to have in-memory data structures? Can we just skip this step if we perform the operations within a function scope?
+	// ANSWER: All buffers are allocated locally.
 
 	// Step 2: Close diskfile
 	dev_close(diskfile_path);
@@ -324,15 +470,17 @@ static int tfs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler, o
 	// Step 1: Call get_node_by_path() to get inode from path
 
 	// Step 2: Read directory entries from its data blocks, and copy them to filler
-	// Note: will have to use fuse_fill_dir_t filler, one of the fuse attributes.
+	// Note: will have to use fuse_fill_dir_t filler, one of the fuse attributes. How exactly do we use this? (online documentation)
 
 	return 0;
 }
 
 
 static int tfs_mkdir(const char *path, mode_t mode) {
+	// ASSUME: This only takes the absolute path, I think.
 
 	// Step 1: Use dirname() and basename() to separate parent directory path and target directory name
+	// these two have to be separated and possibly kept in two different variables (do a test of this)
 
 	// Step 2: Call get_node_by_path() to get inode of parent directory
 
@@ -354,9 +502,10 @@ static int tfs_rmdir(const char *path) {
 
 	// Step 2: Call get_node_by_path() to get inode of target directory
 
-	// Step 3: Clear data block bitmap of target directory
+	// Step 3: Clear data block bitmap of target directory (how do you find this?)
 
 	// Step 4: Clear inode bitmap and its data block
+	// QUESTION: isn't there more than one data block?
 
 	// Step 5: Call get_node_by_path() to get inode of parent directory
 
