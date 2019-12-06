@@ -879,16 +879,72 @@ static int tfs_write(const char *path, const char *buffer, size_t size, off_t of
 static int tfs_unlink(const char *path) {
 
 	// Step 1: Use dirname() and basename() to separate parent directory path and target file name
+	char* str = (char*)malloc(252);
+	char* parent_name = (char*)malloc(252);
+	char* child_name = (char*)malloc(252);
+
+	memset(str, 0, 252);
+	memset(parent_name, 0, 252);
+	memset(child_name, 0, 252);
+
+	strcat(str, path);
+
+	int split_point = strlen(path);
+	while(str[split_point] != '/'){
+		split_point--;
+	}
+
+	memcpy(parent_name, str, split_point);
+	memcpy(child_name, str + (split_point + 1), strlen(str) - (split_point + 1));
 
 	// Step 2: Call get_node_by_path() to get inode of target file
+	struct inode* new_ino = (struct inode*)malloc(sizeof(struct inode));
+
+	int get_target = get_node_by_path(str, 0, new_ino);
+	if(get_target == -1){
+		// Free everything, return an error.
+		free(str);
+		free(parent_name);
+		free(child_name);
+		free(new_ino);
+		return -1;
+	}
 
 	// Step 3: Clear data block bitmap of target file
+	bitmap_t data_block_buffer = (bitmap_t)malloc(BLOCK_SIZE);
+	bio_read(2, data_block_buffer);
+	int data_block_num = 0;
+	for(data_block_num = 0; data_block_num < 16; data_block_num++){
+		int actual_db = new_ino->direct_ptr[data_block_num];
+		if(actual_db == -1){
+			break;
+		}
+		unset_bitmap(data_block_buffer, actual_db);
+	}
+	bio_write(2, data_block_buffer);
+	free(data_block_buffer);
 
 	// Step 4: Clear inode bitmap and its data block
+	bitmap_t inode_bit_buffer = (bitmap_t)malloc(BLOCK_SIZE);
+	bio_read(1, inode_bit_buffer);
+	unset_bitmap(inode_bit_buffer, new_ino->ino);
+	int iterate = 0;
+	for(iterate = 0; iterate < 16; iterate++){
+		new_ino->direct_ptr[iterate] = -1;
+	}
+	bio_write(1, inode_bit_buffer);
+	free(inode_bit_buffer);
 
 	// Step 5: Call get_node_by_path() to get inode of parent directory
+	struct inode* parent_inode = (struct inode*)malloc(sizeof(struct inode));
+	get_node_by_path(parent_name, 0, parent_inode);
 
 	// Step 6: Call dir_remove() to remove directory entry of target file in its parent directory
+	int can_remove = dir_remove(*parent_inode, child_name, strlen(child_name));
+	if(can_remove == -1){
+		free(parent_inode);
+		return -1;
+	}
 
 	return 0;
 }
@@ -952,4 +1008,3 @@ int main(int argc, char *argv[]) {
 
 	return fuse_stat;
 }
-
