@@ -130,7 +130,6 @@ int writei(uint16_t ino, struct inode *inode) {
  */
 int dir_find(uint16_t ino, const char *fname, size_t name_len, struct dirent *dirent) {
 	// STATUS: I think this one is done, but double check anyway.
-	printf("dir_find() is now being called with %s.\n", fname);
 
   	// Step 1: Call readi() to get the inode using ino (inode number of current directory)
 	struct inode* inode_buffer = (struct inode*)malloc(sizeof(struct inode));
@@ -141,7 +140,6 @@ int dir_find(uint16_t ino, const char *fname, size_t name_len, struct dirent *di
 	int data_block = 0;
 	for(data_block = 0; data_block < 16; data_block++){
 		int curr_addr = inode_buffer->direct_ptr[data_block];
-		printf("curr_addr, dir_find() = %d\n", curr_addr);
 		if(curr_addr == -1){
 			free(inode_buffer);	// forgot to free this at first
 			return -1;		// couldn't find the entry you wanted to look for
@@ -150,17 +148,14 @@ int dir_find(uint16_t ino, const char *fname, size_t name_len, struct dirent *di
 		bio_read(curr_addr, (void*)block_buffer);		// was in the first line of the for() loop before
 		int dirent_no = 0;
 		for(dirent_no = 0; dirent_no < 16; dirent_no++){
-			printf("dirent_no, dir_find() = %d\n", dirent_no);
 			struct dirent* curr_file = block_buffer[dirent_no];
 			if(curr_file == NULL){
-				printf("dirent is NULL.\n");
 				free(inode_buffer);
 				free(block_buffer);
 				return -1;	// no more files can be after a NULL block
 			}
 
 			if(strcmp(curr_file->name, fname) == 0 && strlen(curr_file->name) == name_len && curr_file->valid == 1){
-				printf("%s has been found!\n", fname);
 				memcpy(dirent, curr_file, sizeof(struct dirent));		// can't have NULL here, seg fault (this is where the actual writing takes place)
 				free(inode_buffer);
 				free(block_buffer);
@@ -181,7 +176,6 @@ int dir_find(uint16_t ino, const char *fname, size_t name_len, struct dirent *di
 int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t name_len) {
 
 	// If you find an invalid dirent struct or a NULL spot, place a dirent entry into the file system.
-	printf("dir_add() is now being called.\n");
 
 	// Step 1: Read dir_inode's data block and check each directory entry of dir_inode
 	// Step 2: Check if fname (directory name) is already used in other entries
@@ -240,11 +234,6 @@ int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t na
 				memset(new_entry->name, 0, sizeof(new_entry->name));
 				strcat(new_entry->name, fname);
 				block_buffer[dirent_no] = new_entry;
-
-				printf("You just added a new entry.\n");
-				printf("block_buffer[dirent_no]->ino = %d\n", block_buffer[dirent_no]->ino);
-				printf("block_buffer[dirent_no]->valid = %d\n", block_buffer[dirent_no]->valid);
-				printf("block_buffer[dirent_no]->name = %s\n", block_buffer[dirent_no]->name);
 
 				bio_write(curr_addr, (void*)block_buffer);	// now, the modified block buffer
 				// free(block_buffer);				// can now free, as it persists on the file
@@ -324,16 +313,14 @@ int dir_remove(struct inode dir_inode, const char *fname, size_t name_len) {
  */
 int get_node_by_path(const char *path, uint16_t ino, struct inode *inode) {
 	// Remember: This only takes an absolute path, as all FUSE operations do.
-	printf("get_node_by_path() is getting called with = %s\n", path);
 
 	// Step 1: Resolve the path name, walk through path, and finally, find its inode.
 	// Note: You could either implement it in a iterative way or recursive way
-	char* str = (char*)malloc(256);
-	memset(str, 0, 256); 		// zero memset doesn't cause a seg fault, also ensures no foreign characters
+	char* str = (char*)malloc(252);
+	memset(str, 0, 252); 		// zero memset doesn't cause a seg fault, also ensures no foreign characters
 	strcat(str, path);
 	char* token;
 	uint16_t curr_ino_num = ino;
-	printf("curr_ino_num = %d\n", curr_ino_num);
 
 	token = strtok(str, "/");
 
@@ -484,13 +471,11 @@ static void tfs_destroy(void *userdata) {
 static int tfs_getattr(const char *path, struct stat *stbuf) {
 	// Note: This function gets activated when you perform ls -l or stat on a given file/directory.
 	// Plan of action: test this function first, on the root directory.
-	printf("tfs_getattr() is being called with %s\n", path);
 
 	// Step 1: call get_node_by_path() to get inode from path
 	struct inode* inode_buffer = (struct inode*)malloc(sizeof(struct inode));
 	int node_find = get_node_by_path(path, 0, inode_buffer);		// assume you always start from the root, as in recitation
 	if(node_find == -1){
-		printf("tfs_getaddr() is unsuccessful.\n");
 		free(inode_buffer);
 		return -ENOENT;							// no such file or directory exists
 	}
@@ -504,28 +489,63 @@ static int tfs_getattr(const char *path, struct stat *stbuf) {
 	stbuf->st_blocks = (inode_buffer->vstat).st_blocks;
 
 	// I think this part works, as tested by a print statement with the "/" directory.
-	printf("tfs_getaddr() is successful.\n");
 	free(inode_buffer);
 	return 0;
 }
 
 static int tfs_opendir(const char *path, struct fuse_file_info *fi) {
+
 	// Step 1: Call get_node_by_path() to get inode from path
-	// struct inode* new_ino = (struct inode*)malloc(sizeof(struct inode));
+	struct inode* ino_buf = (struct inode*)malloc(sizeof(struct inode));
+	int grab_node = get_node_by_path(path, 0, ino_buf);
 
 	// Step 2: If not find, return -1
+	if(grab_node == -1){
+		free(ino_buf);
+		return -1;
+	}
 
+	// This means you were able to find the directory successfully.
 	return 0;
 }
 
 static int tfs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) {
 
 	// Step 1: Call get_node_by_path() to get inode from path
+	struct inode* inode_buffer = (struct inode*)malloc(sizeof(struct inode));
+	int get_node = get_node_by_path(path, 0, inode_buffer);
+	if(get_node == -1){
+		free(inode_buffer);
+		return -1;			// this function only fails if there is no such directory (can return -ENOENT)
+	}
 
 	// Step 2: Read directory entries from its data blocks, and copy them to filler
 	// Go through all of the possible data blocks until you find something null. Don't copy it over if the valid attribute it zero.
 	// Note: will have to use fuse_fill_dir_t filler, one of the fuse attributes. How exactly do we use this? (online documentation)
+	int data_block = 0;
+	for(data_block = 0; data_block < 16; data_block++){
+		int curr_addr = inode_buffer->direct_ptr[data_block];
+		if(curr_addr == -1){
+			break;				// break out of the loop
+		}
+		struct dirent** block_buffer = (struct dirent**)malloc(BLOCK_SIZE);
+		bio_read(curr_addr, (void*)block_buffer);
+		int dirent_no = 0;
+		for(dirent_no = 0; dirent_no < 16; dirent_no++){
+			struct dirent* curr_file = block_buffer[dirent_no];
+			if(curr_file == NULL){
+				break;			// you will end up in the 
+			}
+			// Only read valid file directory entries.
+			if(curr_file->valid == 1){
+				// Fill the buffer with all of the information.
+				filler(buffer, curr_file->name, NULL, 0);
+			}
+		}
+		free(block_buffer);			// prevent memory leaks; don't do it in the for loop (don't want to double free)
+	}
 
+	free(inode_buffer);				// wait until the end to free it
 	return 0;
 }
 
@@ -536,19 +556,19 @@ static int tfs_mkdir(const char *path, mode_t mode) {
 	// Also, handle the cases where the parent and/or child are blank. (I think that's already handled, as seen from last night.)
 
 	// Edge case: if the path name is too long, throw an error. (Maybe do this for all operations.)
-	if(strlen(path) > 256){
+	if(strlen(path) > 252){
 		return -1;					// path name was too long, will ensure you won't get a long name for other directory operations
 	}
 
 	// Step 1: Use dirname() and basename() to separate parent directory path and target directory name.
-	char* str = (char*)malloc(256);				// 256 is the maximum length for a directory
-	char* parent_name = (char*)malloc(256);			// parent directory
-	char* child_name = (char*)malloc(256);			// child directory
+	char* str = (char*)malloc(252);				// 256 is the maximum length for a directory
+	char* parent_name = (char*)malloc(252);			// parent directory
+	char* child_name = (char*)malloc(252);			// child directory
 
 	// Zero out these buffers to ensure that there are no garbage characters.
-	memset(str, 0, 256);
-	memset(parent_name, 0, 256);
-	memset(child_name, 0, 256);
+	memset(str, 0, 252);
+	memset(parent_name, 0, 252);
+	memset(child_name, 0, 252);
 
 	strcat(str, path);					// full directory name
 
@@ -563,7 +583,6 @@ static int tfs_mkdir(const char *path, mode_t mode) {
 
 	// Step 2: Call get_node_by_path() to get inode of parent directory
 	struct inode* new_ino = (struct inode*)malloc(sizeof(struct inode));
-	// TODO: zero it out here as well, prevent garbage characters (actually, I think it's already zeroed out in get_node_by_path())
 
 	// Second parameter is 0 because the root inode number is 0 and you always assume that path passed in is absolute.
 	int get_path = get_node_by_path(parent_name, 0, new_ino);
@@ -637,14 +656,14 @@ static int tfs_mkdir(const char *path, mode_t mode) {
 static int tfs_rmdir(const char *path) {
 
 	// Step 1: Use dirname() and basename() to separate parent directory path and target directory name
-	char* str = (char*)malloc(256);				// this might actually be 252, check this (OFFICE HOURS)
-	char* parent_name = (char*)malloc(256);			// also ask if he sent an announcement about the test file
-	char* child_name = (char*)malloc(256);
+	char* str = (char*)malloc(252);				// this might actually be 252, check this (OFFICE HOURS)
+	char* parent_name = (char*)malloc(252);			// also ask if he sent an announcement about the test file
+	char* child_name = (char*)malloc(252);
 
 	// Zero out the buffers, as was done in tfs_mkdir().
-	memset(str, 0, 256);
-	memset(parent_name, 0, 256);
-	memset(child_name, 0, 256);
+	memset(str, 0, 252);
+	memset(parent_name, 0, 252);
+	memset(child_name, 0, 252);
 
 	strcat(str, path);
 
@@ -674,7 +693,8 @@ static int tfs_rmdir(const char *path) {
 	// Step 3: Clear data block bitmap of target directory
 	// Read the data block with the data block bitmap, block #2.
 	// Remember, you might have to loop through up to 16 blocks. (This is a simpler loop.)
-	bitmap_t data_block_buffer = (bitmap_t)malloc(BLOCK_SIZE);
+	bitmap_t data_block_buffer = (bitmap_t)malloc(BLOCK_SIZE);		// this has to be written into disk
+	bio_read(2, data_block_buffer);
 	int data_block_num = 0;
 	for(data_block_num = 0; data_block_num < 16; data_block_num++){
 		int actual_db = new_ino->direct_ptr[data_block_num];		// data block number in disk
@@ -684,6 +704,7 @@ static int tfs_rmdir(const char *path) {
 		// I don't think you need to set the direct pointer blocks to -1 (but leave a note here)
 		unset_bitmap(data_block_buffer, actual_db);
 	}
+	bio_write(2, data_block_buffer);
 	free(data_block_buffer);
 
 	// Step 4: Clear inode bitmap and its data block (s)
@@ -695,11 +716,12 @@ static int tfs_rmdir(const char *path) {
 	for(iterate = 0; iterate < 16; iterate++){
 		new_ino->direct_ptr[iterate] = -1;
 	}
+	bio_write(1, inode_bit_buffer);
 	free(inode_bit_buffer);
 
 	// Step 5: Call get_node_by_path() to get inode of parent directory
 	struct inode* parent_inode = (struct inode*)malloc(sizeof(struct inode));
-	int get_parent = get_node_by_path(parent_name, 0, parent_inode);
+	get_node_by_path(parent_name, 0, parent_inode);
 	// No errors should happen here, so no error checking will be done. It was implicitly done in the check above.
 
 	// Step 6: Call dir_remove() to remove directory entry of target directory in its parent directory
@@ -715,31 +737,115 @@ static int tfs_rmdir(const char *path) {
 static int tfs_releasedir(const char *path, struct fuse_file_info *fi) {
 	// For this project, you don't need to fill this function
 	// But DO NOT DELETE IT!
-    return 0;
+	return 0;
 }
 
 static int tfs_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
 
+	// Edge case: make sure the path name isn't too long.
+	if(strlen(path) > 252){
+		return -1;			// the pathname is too long, return an error
+	}
+
 	// Step 1: Use dirname() and basename() to separate parent directory path and target file name
+	char* str = (char*)malloc(252);
+	char* parent_name = (char*)malloc(252);
+	char* child_name = (char*)malloc(252);
+
+	memset(str, 0, 252);
+	memset(parent_name, 0, 252);
+	memset(child_name, 0, 252);
+
+	strcat(str, path);
+
+	int split_point = strlen(path);
+	while(str[split_point] != '/'){
+		split_point--;
+	}
+
+	memcpy(parent_name, str, split_point);
+	memcpy(child_name, str + (split_point + 1), strlen(str) - (split_point + 1));
 
 	// Step 2: Call get_node_by_path() to get inode of parent directory
+	struct inode* new_ino = (struct inode*)malloc(sizeof(struct inode));
 
-	// Step 3: Call get_avail_ino() to get an available inode number
+	int get_path = get_node_by_path(parent_name, 0, new_ino);
+	if(get_path == -1){
+		// Free the in-memory data structures.
+		free(str);
+		free(parent_name);
+		free(child_name);
+		free(new_ino);
+		return -1;			// the path name couldn't be found
+	}
+
+	// Step 3: Call get_avail_ino() to get an available inode number (for the child piece)
+	int available_ino_num = get_avail_ino();
+	if(available_ino_num == -1){
+		// Free the in-memory data structures.
+		free(str);
+		free(parent_name);
+		free(child_name);
+		free(new_ino);
+		return -1;			// means you have no more inodes available
+	}
 
 	// Step 4: Call dir_add() to add directory entry of target file to parent directory
+	int add_dir = dir_add(*new_ino, available_ino_num, child_name, strlen(child_name));
+	if(add_dir == -1){
+		// Free the in-memory data structures.
+		free(str);
+		free(parent_name);
+		free(child_name);
+		free(new_ino);
+		return -1;			// means adding this directory would create a duplicate
+	}
 
 	// Step 5: Update inode for target file
+	struct inode* child_inode = (struct inode*)malloc(sizeof(struct inode));
+	child_inode->ino = available_ino_num;
+	child_inode->valid = 1;
+	child_inode->size = 0;			// at first, files have a size of zero
+	child_inode->type = 0; 			// files are type "0" (include in the documentation)
+	child_inode->link = 1;			// it will stay at 1, since we're not worrying about soft/hard links
+	int get_block = get_avail_blkno();
+	if(get_block == -1){
+		free(child_inode);
+		return -1;			// couldn't find an available block number
+	}
+	child_inode->direct_ptr[0] = get_block + 67;
+	int iter = 1;
+	for(iter = 1; iter < 16; iter++){
+		child_inode->direct_ptr[iter] = -1;
+	}
+	(child_inode->vstat).st_ino = available_ino_num;
+	(child_inode->vstat).st_mode = mode | S_IFREG;
+	(child_inode->vstat).st_size = 0;			// initialize the size of files to 0
+	(child_inode->vstat).st_blksize = BLOCK_SIZE;
+	(child_inode->vstat).st_blocks = 1; 			// each file starts with only one block
 
 	// Step 6: Call writei() to write inode to disk
+	writei(available_ino_num, child_inode);
+	free(child_inode);
+
+	printf("inode number written to (file) = %d\n", available_ino_num);
 
 	return 0;
 }
 
 static int tfs_open(const char *path, struct fuse_file_info *fi) {
 
+	// Note: this follows the same process as tfs_opendir().
+
 	// Step 1: Call get_node_by_path() to get inode from path
+	struct inode* ino_buf = (struct inode*)malloc(sizeof(struct inode));
+	int grab_node = get_node_by_path(path, 0, ino_buf);
 
 	// Step 2: If not find, return -1
+	if(grab_node == -1){
+		free(ino_buf);
+		return -1;
+	}
 
 	return 0;
 }
@@ -790,7 +896,7 @@ static int tfs_unlink(const char *path) {
 static int tfs_truncate(const char *path, off_t size) {
 	// For this project, you don't need to fill this function
 	// But DO NOT DELETE IT!
-    return 0;
+        return 0;
 }
 
 static int tfs_release(const char *path, struct fuse_file_info *fi) {
@@ -802,13 +908,13 @@ static int tfs_release(const char *path, struct fuse_file_info *fi) {
 static int tfs_flush(const char * path, struct fuse_file_info * fi) {
 	// For this project, you don't need to fill this function
 	// But DO NOT DELETE IT!
-    return 0;
+        return 0;
 }
 
 static int tfs_utimens(const char *path, const struct timespec tv[2]) {
 	// For this project, you don't need to fill this function
 	// But DO NOT DELETE IT!
-    return 0;
+        return 0;
 }
 
 
