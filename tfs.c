@@ -213,7 +213,7 @@ int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t na
 			block_buffer[0] = new_entry;		// TODO: should you do a memcpy() here instead? (I don't think so, but keep this in mind)
 
 			bio_write(data_blk_num, (void*)block_buffer);		// write the data block back into the file
-			// free(block_buffer);					// can now free, as it persists on the file
+			free(block_buffer);					// can now free, as it persists on the file
 			// free(new_entry);					// can now free, as it persists on the file
 			return 0;						// successful return, had to allocate a new data block
 		}
@@ -236,7 +236,7 @@ int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t na
 				block_buffer[dirent_no] = new_entry;
 
 				bio_write(curr_addr, (void*)block_buffer);	// now, the modified block buffer
-				// free(block_buffer);				// can now free, as it persists on the file
+				free(block_buffer);				// can now free, as it persists on the file
 				// free(new_entry);				// can now free, as it persists on the file
 				return 0;					// successful return, wrote on a pre-existing data block
 			}
@@ -249,7 +249,7 @@ int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t na
 				strcat(new_entry->name, fname);
 				block_buffer[dirent_no] = new_entry;
 				bio_write(curr_addr, (void*)block_buffer);
-				// free(block_buffer);
+				free(block_buffer);
 				// free(new_entry);
 				return 0;		// successful return, wrote on a pre-existing data block
 			}
@@ -656,8 +656,8 @@ static int tfs_mkdir(const char *path, mode_t mode) {
 static int tfs_rmdir(const char *path) {
 
 	// Step 1: Use dirname() and basename() to separate parent directory path and target directory name
-	char* str = (char*)malloc(252);				// this might actually be 252, check this (OFFICE HOURS)
-	char* parent_name = (char*)malloc(252);			// also ask if he sent an announcement about the test file
+	char* str = (char*)malloc(252);
+	char* parent_name = (char*)malloc(252);
 	char* child_name = (char*)malloc(252);
 
 	// Zero out the buffers, as was done in tfs_mkdir().
@@ -847,14 +847,18 @@ static int tfs_open(const char *path, struct fuse_file_info *fi) {
 		return -1;
 	}
 
+	free(ino_buf);
 	return 0;
 }
 
 static int tfs_read(const char *path, char *buffer, size_t size, off_t offset, struct fuse_file_info *fi) {
 
 	// Step 1: You could call get_node_by_path() to get inode from path
+	// struct inode* inode_buffer = (struct inode*)malloc(sizeof(struct inode));
+	// int grab_node = get_node_by_path(path, 0, inode_buffer);
 
 	// Step 2: Based on size and offset, read its data blocks from disk
+	// The offset and size will tell you which data blocks to read.
 
 	// Step 3: copy the correct amount of data from offset to buffer
 
@@ -863,17 +867,103 @@ static int tfs_read(const char *path, char *buffer, size_t size, off_t offset, s
 }
 
 static int tfs_write(const char *path, const char *buffer, size_t size, off_t offset, struct fuse_file_info *fi) {
+
 	// Step 1: You could call get_node_by_path() to get inode from path
+	struct inode* inode_buffer = (struct inode*)malloc(sizeof(struct inode));
+	int grab_node = get_node_by_path(path, 0, inode_buffer);
+	// If you can't find the file, you can't write to it.
+	if(grab_node == -1){
+		free(inode_buffer);
+		return -1; 						// put in the right error code later
+	}
 
 	// Step 2: Based on size and offset, read its data blocks from disk
+	// This will tell you which data blocks to read.
+	int bytes_written = 0;						// keep a running tally of how much you wrote
+	int data_block = offset / BLOCK_SIZE; 				// which block you want to start from
+	int data_block_offset = offset % BLOCK_SIZE;			// offset within the first data block
+
+	int end_point = offset + size;					// where you're projected to end in the file
+	int blocks_added = 0;						// the number of blocks allocated, needed for struct vstat
+
+	// If the file is larger than the 16 blocks, then return an error.
+	if(end_point > BLOCK_SIZE * 16){
+		return -EFBIG;						// file too big for file system
+	}
+
+	// If you got to this point in the code, then the write operation will be successful.
 
 	// Step 3: Write the correct amount of data from offset to disk
+	// The data block pointer will tell you which block to read from.
+	void* first_buffer = malloc(BLOCK_SIZE);
+	if(inode_buffer->direct_ptr[data_block] == -1){
+		inode_buffer->direct_ptr[data_block] = get_avail_blkno() + 67;
+	}
+	bio_read(inode_buffer->direct_ptr[data_block], first_buffer);		// the first block is not guaranteed a valid pointer (faulty assumption)
+
+	// If the amount of data you have to write is small, you will only have to write in one block.
+	if(size <= BLOCK_SIZE - data_block_offset){
+		memcpy(first_buffer, buffer, size);
+		bio_write(inode_buffer->direct_ptr[data_block], first_buffer);		// write into the disk before freeing
+		bytes_written += size;							// forgot this step, was a bug
+		// printf("first_buffer = %s\n", first_buffer);
+		free(first_buffer);
+		// don't want to return just yet
+	}
+
+	// If you get to this point of execution, this means the file spans more than one block.
+	else{
+		// Substep 1: Fill in the first block.
+		memcpy(first_buffer, buffer, BLOCK_SIZE - data_block_offset);
+		bio_write(inode_buffer->direct_ptr[data_block], first_buffer);		// the first block is guaranteed to have a valid pointer
+		bytes_written += (BLOCK_SIZE - data_block_offset);			// increment this number, keep track of where you are in the buffer
+		free(first_buffer);
+
+		// Substep 2: Fill in all of the full blocks in the middle.
+		int full_blocks = (size - bytes_written) / BLOCK_SIZE;			// this is how many full blocks you have to write
+		int written = 0;
+		for(written = 0; written < full_blocks; written++){
+			void* middle_man = malloc(BLOCK_SIZE);
+			// Validate the data block if it hasn't been allocated yet. Bitmap is internally set within that function.
+			if(inode_buffer->direct_ptr[data_block + (1 + written)] == -1){
+				blocks_added++;
+				inode_buffer->direct_ptr[data_block + (1 + written)] = get_avail_blkno() + 67;
+			}
+			bio_read(inode_buffer->direct_ptr[data_block + (1 + written)], middle_man);
+			memcpy(middle_man, buffer + bytes_written, BLOCK_SIZE);
+			bio_write(inode_buffer->direct_ptr[data_block + (1 + written)], middle_man);
+			bytes_written += BLOCK_SIZE;					// you wrote in one more block
+			free(middle_man);
+		}
+
+		// Substep 3: Check to see if there is anything else to write.
+		int remaining = (size - bytes_written);
+		if(remaining != 0){
+			void* final_block = malloc(BLOCK_SIZE);
+			// Validate the data block if it hasn't been allocated yet.
+			if(inode_buffer->direct_ptr[data_block + (1 + written)] == -1){
+				blocks_added++;
+				inode_buffer->direct_ptr[data_block + (1 + written)] = get_avail_blkno() + 67;
+			}
+			bio_read(inode_buffer->direct_ptr[data_block + (1 + written)], final_block);
+			memcpy(final_block, buffer + bytes_written, remaining);
+			bio_write(inode_buffer->direct_ptr[data_block + (1 + written)], final_block);
+			bytes_written += remaining;
+			free(final_block);
+		}
+	}
 
 	// Step 4: Update the inode info and write it to disk
+	// Substep 1: Update the relevant information.
+	inode_buffer->size += bytes_written;
+	(inode_buffer->vstat).st_size += bytes_written;
+	(inode_buffer->vstat).st_blocks++;			// keep track of the number of blocks you add
+
+	// Substep 2: Write the updated inode to disk.
+	writei(inode_buffer->ino, inode_buffer);
 
 	// Note: this function should return the amount of bytes you write to disk
-	// so, we don't do anything with the size parameter?
-	return size;
+	return bytes_written;
 }
 
 static int tfs_unlink(const char *path) {
@@ -1008,3 +1098,4 @@ int main(int argc, char *argv[]) {
 
 	return fuse_stat;
 }
+
